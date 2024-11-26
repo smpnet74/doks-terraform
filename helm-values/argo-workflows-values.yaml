@@ -1,0 +1,8 @@
+server:
+  autoscaling:
+    enabled: true
+    minReplicas: 1
+  serviceType: LoadBalancer
+  serviceAnnotations:
+    service.beta.kubernetes.io/aws-load-balancer-source-ranges: "24.1.182.208/32"
+    service.beta.kubernetes.io/aws-load-balancer-type: "external"

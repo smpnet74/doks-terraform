@@ -1,0 +1,5 @@
+terraform destroy -target=module.eks_blueprints_addons.module.kube_prometheus_stack.helm_release.this -auto-approve && terraform apply -auto-approve
+terraform destroy -target=module.data_addons.helm_release.kubecost -auto-approve && terraform apply -auto-approve
+
+kubectl patch ingress kubecost-cost-analyzer -n kubecost --type=json -p='[{"op": "remove", "path": "/spec/rules/0/host"}]'
+kubectl get ingress -n kubecost
