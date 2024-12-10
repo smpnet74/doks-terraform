@@ -14,218 +14,6 @@ module "data_addons" {
     values           = [file("${path.module}/helm-values/jupyterhub-values.yaml")]
   }
 
-
-resource "kubernetes_storage_class" "default_gp3" {
-  metadata {
-    name = "gp3"
-    annotations = {
-      "storageclass.kubernetes.io/is-default-class" : "true"
-    }
-  }
-
-  storage_provisioner    = "ebs.csi.aws.com"
-  reclaim_policy        = "Delete"
-  allow_volume_expansion = true
-  volume_binding_mode   = "WaitForFirstConsumer"
-  parameters = {
-    fsType    = "ext4"
-    encrypted = true
-    type      = "gp3"
-  }
-
-  depends_on = [kubernetes_annotations.disable_gp2]
-}
-
-#---------------------------------------------------------------
-# IRSA for EBS CSI Driver
-#---------------------------------------------------------------
-module "ebs_csi_driver_irsa" {
-  source                = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
-  version               = "~> 5.20"
-  role_name_prefix      = format("%s-%s-", local.name, "ebs-csi-driver")
-  attach_ebs_csi_policy = true
-  oidc_providers = {
-    main = {
-      provider_arn               = module.eks.oidc_provider_arn
-      namespace_service_accounts = ["kube-system:ebs-csi-controller-sa"]
-    }
-  }
-  tags = local.tags
-}
-
-#---------------------------------------------------------------
-# EKS Blueprints Addons
-#---------------------------------------------------------------
-module "eks_blueprints_addons" {
-  source  = "aws-ia/eks-blueprints-addons/aws"
-  version = "~> 1.2"
-
-  cluster_name      = module.eks.cluster_name
-  cluster_endpoint  = module.eks.cluster_endpoint
-  cluster_version   = module.eks.cluster_version
-  oidc_provider_arn = module.eks.oidc_provider_arn
-
-  #---------------------------------------
-  # Amazon EKS Managed Add-ons
-  #---------------------------------------
-  eks_addons = {
-    aws-ebs-csi-driver = {
-      service_account_role_arn = module.ebs_csi_driver_irsa.iam_role_arn
-    }
-    coredns = {
-      preserve = true
-    }
-    kube-proxy = {
-      preserve = true
-    }
-    vpc-cni = {
-      preserve = true
-    }
-  }
-
-  #---------------------------------------
-  # AWS Load Balancer Controller Add-on
-  #---------------------------------------
-  enable_aws_load_balancer_controller = true
-  aws_load_balancer_controller = {
-    set = [
-      {
-        name  = "enableServiceMutatorWebhook"
-        value = "false"
-      }
-    ]
-  }
-
-  #---------------------------------------
-  # Ingress Nginx Add-on
-  #---------------------------------------
-  enable_ingress_nginx = true
-  ingress_nginx = {
-    values = [templatefile("${path.module}/helm-values/ingress-nginx-values.yaml", {
-      certificate_arn = aws_acm_certificate.domain.arn
-    })]
-  }
-
-  #---------------------------------------
-  # Karpenter Autoscaler for EKS Cluster
-  #---------------------------------------
-  enable_karpenter                  = true
-  karpenter_enable_spot_termination = true
-  karpenter_node = {
-    iam_role_additional_policies = {
-      AmazonSSMManagedInstanceCore = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-    }
-  }
-  karpenter = {
-    chart_version       = "0.37.0"
-    repository_username = data.aws_ecrpublic_authorization_token.token.user_name
-    repository_password = data.aws_ecrpublic_authorization_token.token.password
-    source_policy_documents = [
-      data.aws_iam_policy_document.karpenter_controller_policy.json
-    ]
-  }
-
-  #---------------------------------------
-  # Argo Workflows & Argo Events
-  #---------------------------------------
-  enable_argo_workflows = true
-  argo_workflows = {
-    name       = "argo-workflows"
-    namespace  = "argo-workflows"
-    repository = "https://argoproj.github.io/argo-helm"
-    values     = [templatefile("${path.module}/helm-values/argo-workflows-values.yaml", {})]
-  }
-
-  enable_argo_events = true
-  argo_events = {
-    name       = "argo-events"
-    namespace  = "argo-events"
-    repository = "https://argoproj.github.io/argo-helm"
-    values     = [templatefile("${path.module}/helm-values/argo-events-values.yaml", {})]
-  }
-
-  #---------------------------------------
-  # Prometheus and Grafana stack
-  #---------------------------------------
-  enable_kube_prometheus_stack = true
-  kube_prometheus_stack = {
-    values = [
-      templatefile("${path.module}/helm-values/kube-prometheus.yaml", {
-        storage_class_type = kubernetes_storage_class.default_gp3.id
-      })
-    ]
-    chart_version = "48.1.1"
-    set_sensitive = [
-      {
-        name  = "grafana.adminPassword"
-        value = data.aws_secretsmanager_secret_version.admin_password_version.secret_string
-      }
-    ]
-    depends_on = ["ingress-nginx"]
-  }
-
-  #---------------------------------------
-  # CloudWatch metrics for EKS
-  #---------------------------------------
-  enable_aws_cloudwatch_metrics = true
-  aws_cloudwatch_metrics = {
-    values = [templatefile("${path.module}/helm-values/aws-cloudwatch-metrics-values.yaml", {})]
-  }
-}
-
-# First create the JupyterHub namespace
-resource "kubernetes_namespace_v1" "jupyterhub" {
-  metadata {
-    name = "jupyterhub"
-  }
-}
-
-# Then create required resources for JupyterHub
-resource "kubernetes_secret_v1" "huggingface_token" {
-  metadata {
-    name      = "hf-token"
-    namespace = kubernetes_namespace_v1.jupyterhub.id
-  }
-
-  data = {
-    token = var.huggingface_token
-  }
-
-  depends_on = [kubernetes_namespace_v1.jupyterhub]
-}
-
-resource "kubernetes_config_map_v1" "notebook" {
-  metadata {
-    name      = "notebook"
-    namespace = kubernetes_namespace_v1.jupyterhub.id
-  }
-
-  data = {
-    "dogbooth.ipynb" = file("${path.module}/src/notebook/dogbooth.ipynb")
-  }
-
-  depends_on = [kubernetes_namespace_v1.jupyterhub]
-}
-
-#---------------------------------------------------------------
-# Data on EKS Kubernetes Addons
-#---------------------------------------------------------------
-module "data_addons" {
-  source  = "aws-ia/eks-data-addons/aws"
-  version = "1.33.0"
-
-  oidc_provider_arn = module.eks.oidc_provider_arn
-
-  #---------------------------------------------------------------
-  # JupyterHub Add-on
-  #---------------------------------------------------------------
-  enable_jupyterhub = true
-  jupyterhub_helm_config = {
-    namespace        = kubernetes_namespace_v1.jupyterhub.id
-    create_namespace = false
-    values           = [file("${path.module}/helm-values/jupyterhub-values.yaml")]
-  }
-
   enable_volcano = true
   #---------------------------------------
   # Kuberay Operator
@@ -445,4 +233,194 @@ data "aws_iam_policy_document" "karpenter_controller_policy" {
     effect    = "Allow"
     sid       = "KarpenterControllerAdditionalPolicy"
   }
+}
+
+resource "kubernetes_storage_class" "default_gp3" {
+  metadata {
+    name = "gp3"
+    annotations = {
+      "storageclass.kubernetes.io/is-default-class" : "true"
+    }
+  }
+
+  storage_provisioner    = "ebs.csi.aws.com"
+  reclaim_policy        = "Delete"
+  allow_volume_expansion = true
+  volume_binding_mode   = "WaitForFirstConsumer"
+  parameters = {
+    fsType    = "ext4"
+    encrypted = true
+    type      = "gp3"
+  }
+}
+
+#---------------------------------------------------------------
+# IRSA for EBS CSI Driver
+#---------------------------------------------------------------
+module "ebs_csi_driver_irsa" {
+  source                = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+  version               = "~> 5.20"
+  role_name_prefix      = format("%s-%s-", local.name, "ebs-csi-driver")
+  attach_ebs_csi_policy = true
+  oidc_providers = {
+    main = {
+      provider_arn               = module.eks.oidc_provider_arn
+      namespace_service_accounts = ["kube-system:ebs-csi-controller-sa"]
+    }
+  }
+  tags = local.tags
+}
+
+#---------------------------------------------------------------
+# EKS Blueprints Addons
+#---------------------------------------------------------------
+module "eks_blueprints_addons" {
+  source  = "aws-ia/eks-blueprints-addons/aws"
+  version = "~> 1.2"
+
+  cluster_name      = module.eks.cluster_name
+  cluster_endpoint  = module.eks.cluster_endpoint
+  cluster_version   = module.eks.cluster_version
+  oidc_provider_arn = module.eks.oidc_provider_arn
+
+  #---------------------------------------
+  # Amazon EKS Managed Add-ons
+  #---------------------------------------
+  eks_addons = {
+    aws-ebs-csi-driver = {
+      service_account_role_arn = module.ebs_csi_driver_irsa.iam_role_arn
+    }
+    coredns = {
+      preserve = true
+    }
+    kube-proxy = {
+      preserve = true
+    }
+    vpc-cni = {
+      preserve = true
+    }
+  }
+
+  #---------------------------------------
+  # AWS Load Balancer Controller Add-on
+  #---------------------------------------
+  enable_aws_load_balancer_controller = true
+  aws_load_balancer_controller = {
+    set = [
+      {
+        name  = "enableServiceMutatorWebhook"
+        value = "false"
+      }
+    ]
+  }
+
+  #---------------------------------------
+  # Ingress Nginx Add-on
+  #---------------------------------------
+  enable_ingress_nginx = true
+  ingress_nginx = {
+    values = [templatefile("${path.module}/helm-values/ingress-nginx-values.yaml", {
+      certificate_arn = aws_acm_certificate.domain.arn
+    })]
+  }
+
+  #---------------------------------------
+  # Karpenter Autoscaler for EKS Cluster
+  #---------------------------------------
+  enable_karpenter                  = true
+  karpenter_enable_spot_termination = true
+  karpenter_node = {
+    iam_role_additional_policies = {
+      AmazonSSMManagedInstanceCore = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+    }
+  }
+  karpenter = {
+    chart_version       = "0.37.0"
+    repository_username = data.aws_ecrpublic_authorization_token.token.user_name
+    repository_password = data.aws_ecrpublic_authorization_token.token.password
+    source_policy_documents = [
+      data.aws_iam_policy_document.karpenter_controller_policy.json
+    ]
+  }
+
+  #---------------------------------------
+  # Argo Workflows & Argo Events
+  #---------------------------------------
+  enable_argo_workflows = true
+  argo_workflows = {
+    name       = "argo-workflows"
+    namespace  = "argo-workflows"
+    repository = "https://argoproj.github.io/argo-helm"
+    values     = [templatefile("${path.module}/helm-values/argo-workflows-values.yaml", {})]
+  }
+
+  enable_argo_events = true
+  argo_events = {
+    name       = "argo-events"
+    namespace  = "argo-events"
+    repository = "https://argoproj.github.io/argo-helm"
+    values     = [templatefile("${path.module}/helm-values/argo-events-values.yaml", {})]
+  }
+
+  #---------------------------------------
+  # Prometheus and Grafana stack
+  #---------------------------------------
+  enable_kube_prometheus_stack = true
+  kube_prometheus_stack = {
+    values = [
+      templatefile("${path.module}/helm-values/kube-prometheus.yaml", {
+        storage_class_type = kubernetes_storage_class.default_gp3.id
+      })
+    ]
+    chart_version = "48.1.1"
+    set_sensitive = [
+      {
+        name  = "grafana.adminPassword"
+        value = data.aws_secretsmanager_secret_version.admin_password_version.secret_string
+      }
+    ]
+    depends_on = ["ingress-nginx"]
+  }
+
+  #---------------------------------------
+  # CloudWatch metrics for EKS
+  #---------------------------------------
+  enable_aws_cloudwatch_metrics = true
+  aws_cloudwatch_metrics = {
+    values = [templatefile("${path.module}/helm-values/aws-cloudwatch-metrics-values.yaml", {})]
+  }
+}
+
+# First create the JupyterHub namespace
+resource "kubernetes_namespace_v1" "jupyterhub" {
+  metadata {
+    name = "jupyterhub"
+  }
+}
+
+# Then create required resources for JupyterHub
+resource "kubernetes_secret_v1" "huggingface_token" {
+  metadata {
+    name      = "hf-token"
+    namespace = kubernetes_namespace_v1.jupyterhub.id
+  }
+
+  data = {
+    token = var.huggingface_token
+  }
+
+  depends_on = [kubernetes_namespace_v1.jupyterhub]
+}
+
+resource "kubernetes_config_map_v1" "notebook" {
+  metadata {
+    name      = "notebook"
+    namespace = kubernetes_namespace_v1.jupyterhub.id
+  }
+
+  data = {
+    "dogbooth.ipynb" = file("${path.module}/src/notebook/dogbooth.ipynb")
+  }
+
+  depends_on = [kubernetes_namespace_v1.jupyterhub]
 }
