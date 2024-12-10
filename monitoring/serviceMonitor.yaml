@@ -4,22 +4,17 @@ metadata:
   name: ray-head-monitor
   namespace: kube-prometheus-stack
   labels:
-    # `release: $HELM_RELEASE`: Prometheus can only detect ServiceMonitor with this label.
     release: kube-prometheus-stack
 spec:
   jobLabel: ray-head
-  # Only select Kubernetes Services in the "default" namespace.
   namespaceSelector:
     matchNames:
-      - rayserve-vllm
-  # Only select Kubernetes Services with "matchLabels".
+      - ray-system
   selector:
     matchLabels:
       ray.io/node-type: head
-  # A list of endpoints allowed as part of this ServiceMonitor.
   endpoints:
     - port: metrics
-    - port: as-metrics # autoscaler metrics
-    - port: dash-metrics # dashboard metrics
+      interval: 5s
   targetLabels:
-  - ray.io/cluster
+    - ray.io/cluster

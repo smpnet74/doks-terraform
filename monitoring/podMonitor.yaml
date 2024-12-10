@@ -4,18 +4,15 @@ metadata:
   name: ray-workers-monitor
   namespace: kube-prometheus-stack
   labels:
-    # `release: $HELM_RELEASE`: Prometheus can only detect PodMonitor with this label.
     release: kube-prometheus-stack
 spec:
   jobLabel: ray-workers
-  # Only select Kubernetes Pods in the "default" namespace.
   namespaceSelector:
     matchNames:
-      - rayserve-vllm
-  # Only select Kubernetes Pods with "matchLabels".
+      - ray-system
   selector:
     matchLabels:
       ray.io/node-type: worker
-  # A list of endpoints allowed as part of this PodMonitor.
   podMetricsEndpoints:
-  - port: metrics
+    - port: metrics
+      interval: 5s

@@ -1,19 +1,19 @@
-#---------------------------------------------------------------
-# GP3 Encrypted Storage Class
-#---------------------------------------------------------------
-resource "kubernetes_annotations" "disable_gp2" {
-  annotations = {
-    "storageclass.kubernetes.io/is-default-class" : "false"
-  }
-  api_version = "storage.k8s.io/v1"
-  kind        = "StorageClass"
-  metadata {
-    name = "gp2"
-  }
-  force = true
+module "data_addons" {
+  source  = "aws-ia/eks-data-addons/aws"
+  version = "1.33.0"
 
-  depends_on = [module.eks.eks_cluster_id]
-}
+  oidc_provider_arn = module.eks.oidc_provider_arn
+
+  #---------------------------------------------------------------
+  # JupyterHub Add-on
+  #---------------------------------------------------------------
+  enable_jupyterhub = true
+  jupyterhub_helm_config = {
+    namespace        = kubernetes_namespace_v1.jupyterhub.id
+    create_namespace = false
+    values           = [file("${path.module}/helm-values/jupyterhub-values.yaml")]
+  }
+
 
 resource "kubernetes_storage_class" "default_gp3" {
   metadata {
@@ -78,7 +78,6 @@ module "eks_blueprints_addons" {
     kube-proxy = {
       preserve = true
     }
-    # VPC CNI uses worker node IAM role policies
     vpc-cni = {
       preserve = true
     }
@@ -146,14 +145,8 @@ module "eks_blueprints_addons" {
   }
 
   #---------------------------------------
-  # Prommetheus and Grafana stack
+  # Prometheus and Grafana stack
   #---------------------------------------
-  #---------------------------------------------------------------
-  # 1- Grafana port-forward `kubectl port-forward svc/kube-prometheus-stack-grafana 8080:80 -n kube-prometheus-stack`
-  # 2- Grafana Admin user: admin
-  # 3- Get sexret name from Terrafrom output: `terraform output grafana_secret_name`
-  # 3- Get admin user password: `aws secretsmanager get-secret-value --secret-id <REPLACE_WIRTH_SECRET_ID> --region $AWS_REGION --query "SecretString" --output text`
-  #---------------------------------------------------------------
   enable_kube_prometheus_stack = true
   kube_prometheus_stack = {
     values = [
@@ -168,6 +161,7 @@ module "eks_blueprints_addons" {
         value = data.aws_secretsmanager_secret_version.admin_password_version.secret_string
       }
     ]
+    depends_on = ["ingress-nginx"]
   }
 
   #---------------------------------------
@@ -177,6 +171,40 @@ module "eks_blueprints_addons" {
   aws_cloudwatch_metrics = {
     values = [templatefile("${path.module}/helm-values/aws-cloudwatch-metrics-values.yaml", {})]
   }
+}
+
+# First create the JupyterHub namespace
+resource "kubernetes_namespace_v1" "jupyterhub" {
+  metadata {
+    name = "jupyterhub"
+  }
+}
+
+# Then create required resources for JupyterHub
+resource "kubernetes_secret_v1" "huggingface_token" {
+  metadata {
+    name      = "hf-token"
+    namespace = kubernetes_namespace_v1.jupyterhub.id
+  }
+
+  data = {
+    token = var.huggingface_token
+  }
+
+  depends_on = [kubernetes_namespace_v1.jupyterhub]
+}
+
+resource "kubernetes_config_map_v1" "notebook" {
+  metadata {
+    name      = "notebook"
+    namespace = kubernetes_namespace_v1.jupyterhub.id
+  }
+
+  data = {
+    "dogbooth.ipynb" = file("${path.module}/src/notebook/dogbooth.ipynb")
+  }
+
+  depends_on = [kubernetes_namespace_v1.jupyterhub]
 }
 
 #---------------------------------------------------------------
@@ -205,19 +233,18 @@ module "data_addons" {
   enable_kuberay_operator = true
   kuberay_operator_helm_config = {
     version = "1.1.1"
-    # Enabling Volcano as Batch scheduler for KubeRay Operator
     values = [
       <<-EOT
       batchScheduler:
         enabled: true
-    EOT
+      EOT
     ]
   }
 
   #---------------------------------------------------------------
   # NVIDIA Device Plugin Add-on
   #---------------------------------------------------------------
-  enable_nvidia_device_plugin = true
+  enable_nvidia_device_plugin = false
   nvidia_device_plugin_helm_config = {
     version = "v0.16.1"
     name    = "nvidia-device-plugin"
@@ -239,8 +266,6 @@ module "data_addons" {
   #---------------------------------------
   # EFA Device Plugin Add-on
   #---------------------------------------
-  # IMPORTANT: Enable EFA only on nodes with EFA devices attached.
-  # Otherwise, you'll encounter the "No devices found..." error. Restart the pod after attaching an EFA device, or use a node selector to prevent incompatible scheduling.
   enable_aws_efa_k8s_device_plugin = var.enable_aws_efa_k8s_device_plugin
   aws_efa_k8s_device_plugin_helm_config = {
     values = [file("${path.module}/helm-values/aws-efa-k8s-device-plugin-values.yaml")]
@@ -271,7 +296,7 @@ module "data_addons" {
         amiFamily: Bottlerocket
         karpenterRole: ${split("/", module.eks_blueprints_addons.karpenter.node_iam_role_arn)[1]}
         subnetSelectorTerms:
-          id: ${module.vpc.private_subnets[1]}
+          id: ${module.vpc.private_subnets[2]}
         securityGroupSelectorTerms:
           tags:
             Name: ${module.eks.cluster_name}-node
@@ -305,7 +330,7 @@ module "data_addons" {
             values: ["g5"]
           - key: "karpenter.k8s.aws/instance-size"
             operator: In
-            values: [ "2xlarge" ]
+            values: [ "2xlarge", "4xlarge", "8xlarge" ]
           - key: "kubernetes.io/arch"
             operator: In
             values: ["amd64"]
@@ -387,55 +412,17 @@ module "data_addons" {
 }
 
 #---------------------------------------------------------------
-# Additional Resources
-#---------------------------------------------------------------
-resource "kubernetes_namespace_v1" "jupyterhub" {
-  metadata {
-    name = "jupyterhub"
-  }
-}
-
-resource "kubernetes_secret_v1" "huggingface_token" {
-  metadata {
-    name      = "hf-token"
-    namespace = kubernetes_namespace_v1.jupyterhub.id
-  }
-
-  data = {
-    token = var.huggingface_token
-  }
-}
-
-resource "kubernetes_config_map_v1" "notebook" {
-  metadata {
-    name      = "notebook"
-    namespace = kubernetes_namespace_v1.jupyterhub.id
-  }
-
-  data = {
-    "dogbooth.ipynb" = file("${path.module}/src/notebook/dogbooth.ipynb")
-  }
-}
-
-#---------------------------------------------------------------
 # Grafana Admin credentials resources
-# Login to AWS secrets manager with the same role as Terraform to extract the Grafana admin password with the secret name as "grafana"
 #---------------------------------------------------------------
-data "aws_secretsmanager_secret_version" "admin_password_version" {
-  secret_id  = aws_secretsmanager_secret.grafana.id
-  depends_on = [aws_secretsmanager_secret_version.grafana]
-}
-
 resource "random_password" "grafana" {
   length           = 16
   special          = true
   override_special = "@_"
 }
 
-#tfsec:ignore:aws-ssm-secret-use-customer-key
 resource "aws_secretsmanager_secret" "grafana" {
   name_prefix             = "${local.name}-oss-grafana"
-  recovery_window_in_days = 0 # Set to zero for this example to force delete during Terraform destroy
+  recovery_window_in_days = 0
 }
 
 resource "aws_secretsmanager_secret_version" "grafana" {
@@ -443,11 +430,16 @@ resource "aws_secretsmanager_secret_version" "grafana" {
   secret_string = random_password.grafana.result
 }
 
+data "aws_secretsmanager_secret_version" "admin_password_version" {
+  secret_id  = aws_secretsmanager_secret.grafana.id
+  depends_on = [aws_secretsmanager_secret_version.grafana]
+}
+
 data "aws_iam_policy_document" "karpenter_controller_policy" {
   statement {
     actions = [
       "ec2:RunInstances",
-      "ec2:CreateLaunchTemplate",
+      "ec2:CreateLaunchTemplate"
     ]
     resources = ["*"]
     effect    = "Allow"

@@ -1,33 +1,47 @@
 #!/bin/bash
 
-# List of Terraform modules to apply in sequence
-targets=(
-  "module.vpc"
-  "module.eks"
-)
+# Exit if any command fails
+set -e
 
-# Initialize Terraform
-terraform init -upgrade
+# Apply VPC and EKS first
+echo "Applying VPC and EKS..."
+terraform init
+terraform apply -target=module.vpc \
+               -target=module.eks \
+               -auto-approve
 
-# Apply modules in sequence
-for target in "${targets[@]}"
-do
-  echo "Applying module $target..."
-  apply_output=$(terraform apply -target="$target" -auto-approve 2>&1 | tee /dev/tty)
-  if [[ ${PIPESTATUS[0]} -eq 0 && $apply_output == *"Apply complete"* ]]; then
-    echo "SUCCESS: Terraform apply of $target completed successfully"
-  else
-    echo "FAILED: Terraform apply of $target failed"
-    exit 1
-  fi
-done
+# Apply ACM certificate and wait for validation
+echo "Applying ACM certificate..."
+terraform apply -target=aws_acm_certificate.domain \
+               -target=aws_route53_record.acm_validation \
+               -target=aws_acm_certificate_validation.domain \
+               -auto-approve
 
-# Final apply to catch any remaining resources
+# Apply storage class and EBS CSI driver
+echo "Applying storage configuration..."
+terraform apply -target=kubernetes_annotations.disable_gp2 \
+               -target=kubernetes_storage_class.default_gp3 \
+               -target=module.ebs_csi_driver_irsa \
+               -auto-approve
+
+# Apply EKS blueprints addons
+echo "Applying EKS blueprints addons..."
+terraform apply -target=module.eks_blueprints_addons \
+               -auto-approve
+
+echo "Waiting for AWS Load Balancer Controller and ingress-nginx to be ready..."
+sleep 60
+
+# Apply Route53 configuration
+echo "Applying Route53 configuration..."
+terraform apply -target=aws_route53_record.wildcard \
+               -auto-approve
+
+# Apply data addons (includes KubeRay operator, JupyterHub, and Kubecost)
+echo "Applying data addons..."
+terraform apply -target=module.data_addons \
+               -auto-approve
+
+# Apply remaining resources
 echo "Applying remaining resources..."
-apply_output=$(terraform apply -auto-approve 2>&1 | tee /dev/tty)
-if [[ ${PIPESTATUS[0]} -eq 0 && $apply_output == *"Apply complete"* ]]; then
-  echo "SUCCESS: Terraform apply of all modules completed successfully"
-else
-  echo "FAILED: Terraform apply of all modules failed"
-  exit 1
-fi
+terraform apply -auto-approve

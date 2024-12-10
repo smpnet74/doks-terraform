@@ -4,7 +4,7 @@ kind: Namespace
 metadata:
   name: dogbooth
 ---
-apiVersion: ray.io/v1alpha1
+apiVersion: ray.io/v1
 kind: RayService
 metadata:
   name: dogbooth
@@ -12,11 +12,11 @@ metadata:
 spec:
   serviceUnhealthySecondThreshold: 600
   deploymentUnhealthySecondThreshold: 600
-  serveConfig:
+  serveConfigV2:
     importPath: dogbooth:entrypoint
-    runtimeEnv: |
-      env_vars: {"MODEL_ID": "askulkarni2/dogbooth"}
-      #env_vars: {"MODEL_ID": "stabilityai/stable-diffusion-2-1"}
+    runtime_env:
+      env_vars:
+        MODEL_ID: "askulkarni2/dogbooth"
   rayClusterConfig:
     rayVersion: '2.6.0'
     headGroupSpec:

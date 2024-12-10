@@ -22,6 +22,11 @@ alertmanager:
 grafana:
   enabled: true
   defaultDashboardsEnabled: true
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespace: kube-prometheus-stack
   ingress:
     enabled: true
     ingressClassName: nginx
