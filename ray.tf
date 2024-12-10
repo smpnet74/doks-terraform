@@ -19,7 +19,7 @@ resource "kubernetes_manifest" "ray_cluster" {
       namespace = kubernetes_namespace_v1.ray_system.metadata[0].name
     }
     spec = {
-      rayVersion = "2.9.0"
+      rayVersion = "2.40.0"
       headGroupSpec = {
         rayStartParams = {
           "dashboard-host" = "0.0.0.0",
@@ -32,7 +32,7 @@ resource "kubernetes_manifest" "ray_cluster" {
             containers = [
               {
                 name = "ray-head"
-                image = "rayproject/ray:2.9.0"
+                image = "rayproject/ray:2.40.0"
                 ports = [
                   {
                     containerPort = 6379
@@ -81,7 +81,7 @@ resource "kubernetes_manifest" "ray_cluster" {
               containers = [
                 {
                   name = "ray-worker"
-                  image = "rayproject/ray:2.9.0"
+                  image = "rayproject/ray:2.40.0"
                   ports = [
                     {
                       containerPort = 8080
